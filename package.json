@@ -1,0 +1,30 @@
+{
+  "name": "claude-pinterest",
+  "version": "0.1.0",
+  "description": "Pinterest MCP server with full read and write access to pins, boards, sections, search, and analytics.",
+  "type": "module",
+  "bin": {
+    "claude-pinterest": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
