@@ -2,6 +2,11 @@
 
 Pinterest MCP server with full read and write access to pins, boards, board sections, search, and analytics. Talks to the Pinterest REST API v5 directly over HTTPS, no JDBC driver required.
 
+Supports two auth modes:
+
+* **OAuth with auto refresh (recommended)**: log in once with `npm run auth`, the server keeps the access token fresh on its own.
+* **Static token (one shot)**: paste a pre generated token into the env. Quick to start, has to be rotated manually when it expires.
+
 ## Tools
 
 ### Pins
@@ -18,24 +23,52 @@ Pinterest MCP server with full read and write access to pins, boards, board sect
 
 ## Setup
 
-### 1. Build
+### 1. Install and build
 
 ```bash
 npm install
 npm run build
 ```
 
-### 2. Get a Pinterest access token
+### 2. Create a Pinterest app and copy its credentials
 
-1. Go to https://developers.pinterest.com/apps/ and create an app (or open an existing one).
-2. Under the app's settings, generate an access token with the scopes:
-   `pins:read`, `pins:write`, `boards:read`, `boards:write`, `user_accounts:read`.
-3. For analytics, also request `pins:read_secret` and `boards:read_secret` if you need to inspect protected content.
-4. Copy the token. Pinterest access tokens last 30 days; refresh tokens last 1 year. When the token expires, generate a new one.
+1. Open https://developers.pinterest.com/apps/ and create an app (or open an existing one).
+2. On the app page, copy the **App ID** (this is `PINTEREST_CLIENT_ID`) and the **App secret key** (this is `PINTEREST_CLIENT_SECRET`).
+3. Under **Redirect URIs**, add `http://localhost:8788/callback` (or whatever URI you want to use, see below).
 
-### 3. Configure Claude Desktop
+Make sure the app has these scopes enabled: `pins:read`, `pins:write`, `boards:read`, `boards:write`, `user_accounts:read`. Add `pins:read_secret` and `boards:read_secret` if protected content is in scope.
 
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) and add:
+### 3. Authorize the server (OAuth mode)
+
+Create a `.env` in the project root (gitignored):
+
+```bash
+cp .env.example .env
+```
+
+Fill in `PINTEREST_CLIENT_ID` and `PINTEREST_CLIENT_SECRET`. Then:
+
+```bash
+npm run auth
+```
+
+The CLI:
+
+1. Opens your browser to Pinterest's authorize page.
+2. Listens on `http://localhost:8788/callback` (configurable via `PINTEREST_REDIRECT_URI`).
+3. Captures the authorization code, exchanges it for `access_token` + `refresh_token`.
+4. Saves them to `~/.config/claude-pinterest/tokens.json` with mode `0600`.
+
+The MCP server reads that file at startup and refreshes the access token automatically when it expires.
+
+To revoke or rotate, either:
+
+* Run `npm run auth` again to re authorize (overwrites the file), or
+* Delete `~/.config/claude-pinterest/tokens.json` and revoke access from your Pinterest account settings.
+
+### 4a. Configure Claude Desktop (OAuth mode)
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` and add:
 
 ```json
 {
@@ -46,29 +79,47 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) a
         "/Users/sophia/projects/pinterest-claude MCP/dist/index.js"
       ],
       "env": {
-        "PINTEREST_ACCESS_TOKEN": "your_token_here"
+        "PINTEREST_CLIENT_ID": "your_app_id",
+        "PINTEREST_CLIENT_SECRET": "your_app_secret"
       }
     }
   }
 }
 ```
 
-Restart Claude Desktop. The `pinterest` server should show as connected in the MCP settings panel.
+Restart Claude Desktop.
 
-### 4. Configure Claude Code
+### 4b. Configure Claude Code (OAuth mode)
 
 ```bash
 claude mcp add pinterest \
-  --env PINTEREST_ACCESS_TOKEN=your_token_here \
+  --env PINTEREST_CLIENT_ID=your_app_id \
+  --env PINTEREST_CLIENT_SECRET=your_app_secret \
   -- node "/Users/sophia/projects/pinterest-claude MCP/dist/index.js"
 ```
 
-## Configuration
+### Static token mode (alternative, skip OAuth)
 
-| Variable | Purpose |
-| --- | --- |
-| `PINTEREST_ACCESS_TOKEN` | Required. Bearer token for the Pinterest v5 API. |
-| `PINTEREST_API_BASE` | Optional. Defaults to `https://api.pinterest.com`. Set to `https://api-sandbox.pinterest.com` to hit the sandbox. |
+If `PINTEREST_ACCESS_TOKEN` is set, the server uses it directly and never refreshes. This is the right mode for the 24 hour trial tokens generated from the Pinterest dev portal's "Generate access token" button, or for any short lived bearer you already have on hand.
+
+```bash
+claude mcp add pinterest \
+  --env PINTEREST_ACCESS_TOKEN=pina_... \
+  -- node "/Users/sophia/projects/pinterest-claude MCP/dist/index.js"
+```
+
+When the token expires, generate a new one and update the env. No refresh, no file storage.
+
+## Configuration reference
+
+| Variable | Mode | Purpose |
+| --- | --- | --- |
+| `PINTEREST_CLIENT_ID` | OAuth | App ID from the Pinterest dev portal. |
+| `PINTEREST_CLIENT_SECRET` | OAuth | App secret key from the Pinterest dev portal. |
+| `PINTEREST_REDIRECT_URI` | OAuth | Defaults to `http://localhost:8788/callback`. Must match a redirect URI registered on the app. |
+| `PINTEREST_TOKEN_PATH` | OAuth | Override token storage location. Defaults to `~/.config/claude-pinterest/tokens.json`. |
+| `PINTEREST_ACCESS_TOKEN` | Static | If set, skip OAuth and use this bearer directly. |
+| `PINTEREST_API_BASE` | Both | Defaults to `https://api.pinterest.com`. Set to `https://api-sandbox.pinterest.com` to hit the sandbox. |
 
 ## Example tool calls
 
@@ -117,9 +168,22 @@ Pull analytics for a pin over the last 30 days:
 }
 ```
 
+## Secrets hygiene
+
+Never commit any of these. `.gitignore` covers `.env` already; keep it that way.
+
+* `PINTEREST_CLIENT_SECRET` (app secret key)
+* `PINTEREST_ACCESS_TOKEN` (begins with `pina_`)
+* `refresh_token` (begins with `pinr_`)
+* Any `.env` file containing the above
+* `~/.config/claude-pinterest/tokens.json` (lives outside the repo, but treat it like a credential)
+
+If a token leaks, rotate it: generate a new app secret in the Pinterest dev portal, or revoke and re authorize. Scrubbing git history is theater once a real token has been pushed to a public repo.
+
 ## Notes
 
 * Pinterest's v5 search endpoints scope to the authenticated user's own content. There is no global search via this API.
 * `delete_pin` and `delete_board` are irreversible. Treat them as destructive.
 * Analytics windows are capped at 90 days and the `start_date` must be within the last 90 days.
-* Pinterest rate limits apply per token. The server surfaces 429 responses as `PinterestApiError` with the upstream body intact.
+* Pinterest rate limits apply per token. The server surfaces non 2xx responses as `PinterestApiError` with the upstream body intact.
+* On `401 Unauthorized` in OAuth mode, the server refreshes once and retries the request transparently.

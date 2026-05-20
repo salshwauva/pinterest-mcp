@@ -4,7 +4,8 @@
   "description": "Pinterest MCP server with full read and write access to pins, boards, sections, search, and analytics.",
   "type": "module",
   "bin": {
-    "claude-pinterest": "dist/index.js"
+    "claude-pinterest": "dist/index.js",
+    "claude-pinterest-auth": "dist/cli/auth.js"
   },
   "main": "dist/index.js",
   "files": [
@@ -14,7 +15,8 @@
     "build": "tsc",
     "watch": "tsc --watch",
     "start": "node dist/index.js",
-    "dev": "tsc && node dist/index.js"
+    "dev": "tsc && node dist/index.js",
+    "auth": "node dist/cli/auth.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",

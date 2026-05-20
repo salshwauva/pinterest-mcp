@@ -1,4 +1,13 @@
+import {
+  defaultTokenPath,
+  loadTokens,
+  saveTokens,
+  type StoredTokens,
+} from "./token-store.js";
+import { nowSeconds, refreshAccessToken, tokensFromResponse } from "./oauth.js";
+
 const DEFAULT_BASE = "https://api.pinterest.com";
+const EXPIRY_SKEW_SECONDS = 60;
 
 export class PinterestApiError extends Error {
   status: number;
@@ -11,22 +20,102 @@ export class PinterestApiError extends Error {
   }
 }
 
+type Json = Record<string, unknown> | unknown[] | string | number | boolean | null;
+
+export interface TokenProvider {
+  getAccessToken(): Promise<string>;
+  refresh?(): Promise<string>;
+}
+
+export class StaticTokenProvider implements TokenProvider {
+  constructor(private token: string) {
+    if (!token) throw new Error("StaticTokenProvider requires a non-empty token");
+  }
+  async getAccessToken(): Promise<string> {
+    return this.token;
+  }
+}
+
+export interface RefreshingTokenProviderOptions {
+  client_id: string;
+  client_secret: string;
+  tokenPath?: string;
+  initial?: StoredTokens;
+}
+
+export class RefreshingTokenProvider implements TokenProvider {
+  private tokens: StoredTokens | null = null;
+  private tokenPath: string;
+  private clientId: string;
+  private clientSecret: string;
+  private inflightRefresh: Promise<string> | null = null;
+
+  constructor(opts: RefreshingTokenProviderOptions) {
+    if (!opts.client_id) throw new Error("PINTEREST_CLIENT_ID is required for OAuth refresh");
+    if (!opts.client_secret) throw new Error("PINTEREST_CLIENT_SECRET is required for OAuth refresh");
+    this.clientId = opts.client_id;
+    this.clientSecret = opts.client_secret;
+    this.tokenPath = opts.tokenPath ?? defaultTokenPath();
+    if (opts.initial) this.tokens = opts.initial;
+  }
+
+  private async ensureLoaded(): Promise<StoredTokens> {
+    if (!this.tokens) {
+      this.tokens = await loadTokens(this.tokenPath);
+    }
+    if (!this.tokens) {
+      throw new Error(
+        `No Pinterest tokens found at ${this.tokenPath}. Run 'npx claude-pinterest-auth' to authorize.`,
+      );
+    }
+    return this.tokens;
+  }
+
+  async getAccessToken(): Promise<string> {
+    const tokens = await this.ensureLoaded();
+    if (tokens.expires_at - nowSeconds() < EXPIRY_SKEW_SECONDS) {
+      return this.refresh();
+    }
+    return tokens.access_token;
+  }
+
+  async refresh(): Promise<string> {
+    if (this.inflightRefresh) return this.inflightRefresh;
+    this.inflightRefresh = (async () => {
+      try {
+        const tokens = await this.ensureLoaded();
+        if (!tokens.refresh_token) {
+          throw new Error(
+            "Stored token file has no refresh_token. Re-run 'npx claude-pinterest-auth'.",
+          );
+        }
+        const resp = await refreshAccessToken(
+          { client_id: this.clientId, client_secret: this.clientSecret },
+          tokens.refresh_token,
+        );
+        const next = tokensFromResponse(resp, tokens);
+        this.tokens = next;
+        await saveTokens(next, this.tokenPath);
+        return next.access_token;
+      } finally {
+        this.inflightRefresh = null;
+      }
+    })();
+    return this.inflightRefresh;
+  }
+}
+
 export interface PinterestClientOptions {
-  token: string;
+  provider: TokenProvider;
   baseUrl?: string;
 }
 
-type Json = Record<string, unknown> | unknown[] | string | number | boolean | null;
-
 export class PinterestClient {
-  private token: string;
+  private provider: TokenProvider;
   private baseUrl: string;
 
   constructor(opts: PinterestClientOptions) {
-    if (!opts.token) {
-      throw new Error("PINTEREST_ACCESS_TOKEN is required");
-    }
-    this.token = opts.token;
+    this.provider = opts.provider;
     this.baseUrl = (opts.baseUrl || DEFAULT_BASE).replace(/\/+$/, "");
   }
 
@@ -45,22 +134,36 @@ export class PinterestClient {
     return url.toString();
   }
 
+  private async send(
+    method: string,
+    url: string,
+    body: string | undefined,
+    token: string,
+  ): Promise<Response> {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json",
+    };
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    return fetch(url, { method, headers, body });
+  }
+
   private async request<T = unknown>(
     method: string,
     path: string,
     opts: { query?: Record<string, unknown>; body?: Json } = {},
   ): Promise<T> {
     const url = this.buildUrl(path, opts.query);
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${this.token}`,
-      Accept: "application/json",
-    };
-    let body: string | undefined;
-    if (opts.body !== undefined) {
-      headers["Content-Type"] = "application/json";
-      body = JSON.stringify(opts.body);
+    const body = opts.body !== undefined ? JSON.stringify(opts.body) : undefined;
+
+    let token = await this.provider.getAccessToken();
+    let res = await this.send(method, url, body, token);
+
+    if (res.status === 401 && this.provider.refresh) {
+      token = await this.provider.refresh();
+      res = await this.send(method, url, body, token);
     }
-    const res = await fetch(url, { method, headers, body });
+
     const text = await res.text();
     let parsed: unknown = undefined;
     if (text.length > 0) {
@@ -72,9 +175,9 @@ export class PinterestClient {
     }
     if (!res.ok) {
       const msg =
-        (parsed && typeof parsed === "object" && "message" in (parsed as object)
+        parsed && typeof parsed === "object" && "message" in (parsed as object)
           ? String((parsed as { message: unknown }).message)
-          : `Pinterest API ${method} ${path} failed with ${res.status}`);
+          : `Pinterest API ${method} ${path} failed with ${res.status}`;
       throw new PinterestApiError(res.status, parsed, msg);
     }
     return parsed as T;
@@ -98,14 +201,24 @@ export class PinterestClient {
 }
 
 export function clientFromEnv(): PinterestClient {
-  const token = process.env.PINTEREST_ACCESS_TOKEN;
-  if (!token) {
+  const baseUrl = process.env.PINTEREST_API_BASE;
+  const staticToken = process.env.PINTEREST_ACCESS_TOKEN;
+  if (staticToken) {
+    return new PinterestClient({
+      provider: new StaticTokenProvider(staticToken),
+      baseUrl,
+    });
+  }
+  const client_id = process.env.PINTEREST_CLIENT_ID;
+  const client_secret = process.env.PINTEREST_CLIENT_SECRET;
+  if (!client_id || !client_secret) {
     throw new Error(
-      "PINTEREST_ACCESS_TOKEN is not set. Generate a token at https://developers.pinterest.com/apps/ and set it in the MCP server config env.",
+      "No Pinterest credentials. Either set PINTEREST_ACCESS_TOKEN (one-shot mode), " +
+        "or set PINTEREST_CLIENT_ID + PINTEREST_CLIENT_SECRET and run 'npx claude-pinterest-auth' to authorize.",
     );
   }
   return new PinterestClient({
-    token,
-    baseUrl: process.env.PINTEREST_API_BASE,
+    provider: new RefreshingTokenProvider({ client_id, client_secret }),
+    baseUrl,
   });
 }
