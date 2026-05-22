@@ -92,20 +92,22 @@ Restart Claude Desktop.
 ### 4b. Configure Claude Code (OAuth mode)
 
 ```bash
-claude mcp add \
+claude mcp add pinterest \
   -e PINTEREST_CLIENT_ID=your_app_id \
   -e PINTEREST_CLIENT_SECRET=your_app_secret \
-  pinterest -- node "/Users/sophia/projects/pinterest-claude MCP/dist/index.js"
+  -- node "/Users/sophia/projects/pinterest-claude MCP/dist/index.js"
 ```
+
+The server name must come before the `-e` flags. `-e` is variadic and will swallow the name if it appears after.
 
 ### Static token mode (alternative, skip OAuth)
 
 If `PINTEREST_ACCESS_TOKEN` is set, the server uses it directly and never refreshes. This is the right mode for the 24 hour trial tokens generated from the Pinterest dev portal's "Generate access token" button, or for any short lived bearer you already have on hand.
 
 ```bash
-claude mcp add \
+claude mcp add pinterest \
   -e PINTEREST_ACCESS_TOKEN=pina_... \
-  pinterest -- node "/Users/sophia/projects/pinterest-claude MCP/dist/index.js"
+  -- node "/Users/sophia/projects/pinterest-claude MCP/dist/index.js"
 ```
 
 When the token expires, generate a new one and update the env. No refresh, no file storage.
